@@ -96,15 +96,13 @@ Po każdym okrążeniu sortujesz kierowców po **łącznym czasie**. Kto ma DNF,
 W katalogu projektu:
 
 ```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt
-.\.venv\Scripts\python main.py
+python main.py
 ```
 
 W trakcie działania:
 - wybierasz tor (numer)
-- dostajesz tabelę przedstartową (losowy grid + opony startowe + strategia)
 - wciskasz Enter i startuje symulacja (tabela live + dwa panele logów)
+- dostajesz tabelę (losowy grid + opony startowe + strategia)
 
 ---
 
@@ -116,8 +114,6 @@ W trakcie działania:
 |---|---|
 | `main.py` | Punkt wejścia aplikacji (uruchamia `pitwall.app.run()`). |
 | `requirements.txt` | Zależności Pythona (głównie `rich`). |
-| `readme.MD` | Opis projektu, wzory modelu symulacji i instrukcja. |
-| `UML.png` | Diagram UML dostarczony do projektu. |
 | `data/` | Dane wejściowe do symulacji (CSV). |
 | `pitwall/` | Właściwy kod aplikacji (modele, logika wyścigu, UI). |
 
@@ -139,71 +135,6 @@ W trakcie działania:
 | `pitwall/race.py` | Silnik symulacji: `RaceSimulation` + `RaceEvent`. Metoda `step_lap()` robi pełną aktualizację per okrążenie (czasy, zużycie, pit, DNF, zdarzenia, wyprzedzenia, czerwone flagi). |
 | `pitwall/ui.py` | UI w `rich`: budowanie tabeli, layout (tabela + dwa panele logów), odliczanie czerwonej flagi, prezentacja wyników. |
 | `pitwall/app.py` | Orkiestracja: wybór toru, losowanie pogody i ustawienia kierowców, przygotowanie opon/strategii (`sim.prepare()`), start UI. |
-| `pitwall/__init__.py` | Metadane pakietu. |
+
 
 ---
-
-## Użyte wzorce projektowe (na przykładach z kodu)
-
-### 1) Separacja warstw (Model–View–Controller w praktyce)
-
-To nie jest „frameworkowy” MVC, ale jest czytelny podział odpowiedzialności:
-
-- Model domeny: `Driver`, `Track`, `TireState` w `pitwall/models.py`
-- Logika biznesowa/symulacja: `RaceSimulation` w `pitwall/race.py`
-- Widok (renderowanie): `run_race_ui()` + `_build_table()` w `pitwall/ui.py`
-- Kontroler/orchestrator: `run()` w `pitwall/app.py`
-
-Efekt: UI nie miesza się z obliczaniem czasów okrążeń, a `RaceSimulation` nie musi znać szczegółów `rich`.
-
-### 2) Strategy (dobór opon jako wymienna strategia)
-
-Dobór opon jest wydzielony do metod kierowcy, dzięki czemu „strategia” jest lokalna i łatwa do zmiany:
-
-```python
-# pitwall/models.py
-def pick_next_compound(self, raining: bool) -> TireType:
-	...
-```
-
-Silnik wyścigu korzysta z tego bez wiedzy o szczegółach:
-
-```python
-# pitwall/race.py
-next_compound = d.pick_next_compound(self.raining)
-```
-
-### 3) Dependency Injection (wstrzykiwanie zależności)
-
-`RaceSimulation` dostaje zależności w konstruktorze, zamiast tworzyć je w środku:
-
-```python
-# pitwall/race.py
-RaceSimulation(..., config=config, rng=rng)
-```
-
-To daje kontrolę nad:
-- czasem symulacji (`SimulationConfig.race_real_seconds`)
-- losowością (`random.Random()`), co ułatwia powtarzalność (np. przy debugowaniu).
-
-### 4) Event queue / Observer-lite (emitowanie zdarzeń i konsumowanie w UI)
-
-Symulacja publikuje zdarzenia jako listę `RaceEvent`, a UI je „subskrybuje” przez odczyt przyrostowy:
-
-```python
-# pitwall/race.py
-self.events.append(RaceEvent(kind=..., message=...))
-
-# pitwall/ui.py
-log_index, new_events = sim.pop_new_events(log_index)
-```
-
-To pozwala mieć czytelne logi (oddzielnie „Wyprzedzenia” i „Zdarzenia”) bez sprzęgania UI z wnętrzem silnika.
-
-### 5) State (stan kierowcy i stan opon)
-
-`DriverStatus` i `TireState` modelują stan obiektu w czasie:
-- kierowca przechodzi przez `RUNNING → FINISHED` albo `RUNNING → DNF`
-- opony mają `wear_percent` oraz wynikającą z tego karę czasową (`TireState.penalty_s`)
-
-To jest prosty, ale bardzo czytelny „state machine” dla potrzeb symulacji.
