@@ -183,30 +183,12 @@ def run_race_ui(sim: RaceSimulation, config: SimulationConfig, rng: random.Rando
     layout.split_column(Layout(name="top", ratio=3), Layout(name="bottom", ratio=1))
     layout["bottom"].split_row(Layout(name="bottom_left"), Layout(name="bottom_right"))
 
-    target_dt = 1.0 / max(1.0, config.ui_refresh_hz)
-
     # przelicznik: ile realnie „czekamy” na okrążenie (żeby całość trwała ~race_real_seconds)
     per_lap_sleep = max(0.02, config.race_real_seconds / max(1, sim.track_laps))
 
-    console.clear()
-    console.print(
-        Panel(
-            Text(
-                "PitWall — F1 Simulation\n"
-                "- ENTER: start\n"
-                "- Podczas czerwonej flagi: ENTER = wznowienie\n",
-                justify="left",
-            ),
-            title="Sterowanie",
-            border_style="blue",
-        )
-    )
-    try:
-        console.input("Wciśnij Enter, aby wystartować…")
-    except EOFError:
-        pass
-
-    sim.start()
+    if sim.start_monotonic is None:
+        # Bezpieczny fallback, gdyby UI było użyte bez app.run()
+        sim.start()
 
     last_rf_seen = -1
     with console.status("Symulacja…"):

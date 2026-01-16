@@ -47,10 +47,13 @@ class RaceSimulation:
         self.start_monotonic: float | None = None
         self.finished: bool = False
 
+        # Zegar wyścigu (pauzowany na czerwonej fladze)
+        self._paused_total_s: float = 0.0
+        self._pause_started_monotonic: float | None = None
+
         # Flagi
         self.flag_state: FlagState = FlagState.GREEN
         self._red_flag_active: bool = False
-        self._red_flag_added_time_s: float = 0.0
 
         self._prepared: bool = False
 
@@ -91,13 +94,21 @@ class RaceSimulation:
             return 0.0
         return time.monotonic() - self.start_monotonic
 
-    def race_timer_s(self) -> float:
-        """Zegar wyścigu w skali "Total".
+    def race_clock_elapsed_s(self) -> float:
+        if self.start_monotonic is None:
+            return 0.0
+        paused = self._paused_total_s
+        if self._pause_started_monotonic is not None:
+            paused += time.monotonic() - self._pause_started_monotonic
+        return max(0.0, time.monotonic() - self.start_monotonic - paused)
 
-        Zgodnie z wymaganiem: timer startuje z liderem i kończy się gdy pierwszy kierowca
-        przekroczy metę. W praktyce oznacza to:
-        - dopóki nikt nie ukończył: timer = min(total_time) wśród RUNNING
-        - gdy ktoś ukończył: timer = min(total_time) wśród FINISHED (zamraża się)
+    def race_timer_s(self) -> float:
+        """Timer wyścigu w skali `Total`.
+
+        - dopóki nikt nie ukończył: timer = czas lidera (najmniejszy `total_time_s` w RUNNING)
+        - gdy ktoś ukończy: timer = czas zwycięzcy (najmniejszy `total_time_s` w FINISHED) i pozostaje stały
+
+        Dzięki temu timer jest spójny z kolumną `Total`.
         """
 
         finished_times = [d.total_time_s for d in self.drivers if d.status == DriverStatus.FINISHED]
@@ -107,6 +118,16 @@ class RaceSimulation:
         if running_times:
             return min(running_times)
         return 0.0
+
+    def pause_clock(self) -> None:
+        if self._pause_started_monotonic is None:
+            self._pause_started_monotonic = time.monotonic()
+
+    def resume_clock(self) -> None:
+        if self._pause_started_monotonic is None:
+            return
+        self._paused_total_s += time.monotonic() - self._pause_started_monotonic
+        self._pause_started_monotonic = None
 
     def clear_red_flag(self) -> None:
         self._red_flag_active = False
@@ -147,8 +168,8 @@ class RaceSimulation:
         return base
 
     def _dnf_chance(self, skill: int) -> float:
-        # z readme: 0.2% + (100-skill)*0.01%
-        base = 0.002 + (100 - skill) * 0.0001
+        # z readme: 0.2% + (100-skill)*0.01% zmiana na 1% bo za malo dnf
+        base = 0.01 + (100 - skill) * 0.0001
         # skalowanie do bardziej realistycznej liczby DNF w stawce
         scale = getattr(self.config, "dnf_chance_scale", 0.25)
         return base * float(scale)
@@ -205,14 +226,17 @@ class RaceSimulation:
             rf_max = float(getattr(self.config, "red_flag_duration_max_minutes", 30.0))
             rf_minutes = self.rng.uniform(rf_min, rf_max)
             rf_seconds = rf_minutes * 60.0
-            self._red_flag_added_time_s += rf_seconds
 
-            # dodaj do "Total" wszystkim nie-DNF (nie wpływa na pozycje, bo wszystkim równo)
+            # Doliczamy czas postoju do "Total" wszystkim nie-DNF.
+            # To nie zmienia kolejności (wszyscy dostają tyle samo), ale zmienia timer i total.
             for d in self.drivers:
                 if d.status in (DriverStatus.RUNNING, DriverStatus.FINISHED):
                     d.total_time_s += rf_seconds
 
-            self._log("RF", f"CZERWONA FLAGA! Postój ~{rf_minutes:.0f} min (doliczony do czasu wyścigu).")
+            self._log(
+                "RF",
+                f"CZERWONA FLAGA! Postój ~{rf_minutes:.0f} min (doliczony do czasu wyścigu).",
+            )
             return
 
         # start okrążenia

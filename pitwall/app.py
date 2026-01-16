@@ -103,4 +103,11 @@ def run() -> None:
     console.print("\n")
     console.print(table)
 
+    try:
+        console.input("\nWciśnij Enter, aby wystartować…")
+    except EOFError:
+        pass
+
+    sim.start()
+
     run_race_ui(sim, config, rng)
