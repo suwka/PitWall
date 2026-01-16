@@ -16,13 +16,21 @@ class SimulationConfig:
     max_log_lines: int = 14
 
     # Prawdopodobieństwa zdarzeń (na okrążenie, per kierowca / globalnie)
-    collision_chance_per_lap: float = 0.004  # 0.4%
-    incident_chance_per_lap: float = 0.010   # 1.0% (żółte flagi / drobny incydent)
-    red_flag_chance_per_lap: float = 0.003   # 0.3% (globalnie)
+    collision_chance_per_lap: float = 0.002  # 0.2%
+    incident_chance_per_lap: float = 0.008   # 0.8% (żółte flagi / drobny incydent)
+    red_flag_chance_per_lap: float = 0.002   # 0.2% (globalnie)
+
+    # DNF tuning (żeby nie było "za dużo" w stawce)
+    dnf_chance_scale: float = 0.25
+    collision_dnf_probability: float = 0.35
 
     # Ile realnych sekund „czeka” czerwona flaga (losowo w zakresie)
     red_flag_wait_min_s: float = 6.0
     red_flag_wait_max_s: float = 16.0
+
+    # Ile MINUT dodaje czerwona flaga do czasu wyścigu (symulowany czas FIA)
+    red_flag_duration_min_minutes: float = 15.0
+    red_flag_duration_max_minutes: float = 30.0
 
     # Minimalny odstęp między czerwonymi flagami (w okrążeniach)
     red_flag_cooldown_laps: int = 8

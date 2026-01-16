@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
+from enum import Enum
 
 from pitwall.config import SimulationConfig
 from pitwall.models import Driver, DriverStatus, TireState, TireType
@@ -12,6 +13,12 @@ from pitwall.models import Driver, DriverStatus, TireState, TireType
 class RaceEvent:
     kind: str
     message: str
+
+
+class FlagState(str, Enum):
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+    RED = "RED"
 
 
 class RaceSimulation:
@@ -39,6 +46,11 @@ class RaceSimulation:
         self.events: list[RaceEvent] = []
         self.start_monotonic: float | None = None
         self.finished: bool = False
+
+        # Flagi
+        self.flag_state: FlagState = FlagState.GREEN
+        self._red_flag_active: bool = False
+        self._red_flag_added_time_s: float = 0.0
 
         self._prepared: bool = False
 
@@ -79,6 +91,28 @@ class RaceSimulation:
             return 0.0
         return time.monotonic() - self.start_monotonic
 
+    def race_timer_s(self) -> float:
+        """Zegar wyścigu w skali "Total".
+
+        Zgodnie z wymaganiem: timer startuje z liderem i kończy się gdy pierwszy kierowca
+        przekroczy metę. W praktyce oznacza to:
+        - dopóki nikt nie ukończył: timer = min(total_time) wśród RUNNING
+        - gdy ktoś ukończył: timer = min(total_time) wśród FINISHED (zamraża się)
+        """
+
+        finished_times = [d.total_time_s for d in self.drivers if d.status == DriverStatus.FINISHED]
+        if finished_times:
+            return min(finished_times)
+        running_times = [d.total_time_s for d in self.drivers if d.status == DriverStatus.RUNNING]
+        if running_times:
+            return min(running_times)
+        return 0.0
+
+    def clear_red_flag(self) -> None:
+        self._red_flag_active = False
+        if self.flag_state == FlagState.RED:
+            self.flag_state = FlagState.GREEN
+
     def sorted_running(self) -> list[Driver]:
         running = [d for d in self.drivers if d.status == DriverStatus.RUNNING]
         return sorted(running, key=lambda x: x.total_time_s)
@@ -114,7 +148,10 @@ class RaceSimulation:
 
     def _dnf_chance(self, skill: int) -> float:
         # z readme: 0.2% + (100-skill)*0.01%
-        return 0.002 + (100 - skill) * 0.0001
+        base = 0.002 + (100 - skill) * 0.0001
+        # skalowanie do bardziej realistycznej liczby DNF w stawce
+        scale = getattr(self.config, "dnf_chance_scale", 0.25)
+        return base * float(scale)
 
     def _lap_time_s(self, driver: Driver, tires: TireState) -> float:
         # readme:
@@ -144,10 +181,8 @@ class RaceSimulation:
         if self.finished:
             return
 
-        # timer: stop jeśli realny czas symulacji przekroczył limit
-        if self.real_elapsed_s() >= self.config.race_real_seconds:
-            self._log("FIA", "Koniec czasu: symulacja zakończona limitem (FIA / timer).")
-            self.finished = True
+        # Czerwona flaga zatrzymuje symulację (bez nabijania okrążeń).
+        if self._red_flag_active:
             return
 
         # FIA: max 3h czasu wyścigu (tu: na podstawie minimalnego czasu w stawce)
@@ -157,16 +192,33 @@ class RaceSimulation:
             self.finished = True
             return
 
-        self._lap_index += 1
-
-        # globalny event: red flag
+        # globalny event: red flag (przed okrążeniem)
         if (
             (self._lap_index - self._last_red_flag_lap) >= self.config.red_flag_cooldown_laps
             and self.rng.random() < self.config.red_flag_chance_per_lap
         ):
             self._last_red_flag_lap = self._lap_index
-            self._log("RF", "CZERWONA FLAGA! Wyścig wstrzymany.")
-            # UI obsłuży pauzę / odliczanie
+            self._red_flag_active = True
+            self.flag_state = FlagState.RED
+
+            rf_min = float(getattr(self.config, "red_flag_duration_min_minutes", 15.0))
+            rf_max = float(getattr(self.config, "red_flag_duration_max_minutes", 30.0))
+            rf_minutes = self.rng.uniform(rf_min, rf_max)
+            rf_seconds = rf_minutes * 60.0
+            self._red_flag_added_time_s += rf_seconds
+
+            # dodaj do "Total" wszystkim nie-DNF (nie wpływa na pozycje, bo wszystkim równo)
+            for d in self.drivers:
+                if d.status in (DriverStatus.RUNNING, DriverStatus.FINISHED):
+                    d.total_time_s += rf_seconds
+
+            self._log("RF", f"CZERWONA FLAGA! Postój ~{rf_minutes:.0f} min (doliczony do czasu wyścigu).")
+            return
+
+        # start okrążenia
+        self.flag_state = FlagState.GREEN
+        had_yellow = False
+        self._lap_index += 1
 
         for d in self.drivers:
             if d.status != DriverStatus.RUNNING:
@@ -181,7 +233,9 @@ class RaceSimulation:
             # incydenty / kolizje
             if self.rng.random() < self.config.collision_chance_per_lap:
                 # 50/50: DNF albo strata czasu
-                if self.rng.random() < 0.55:
+                had_yellow = True
+                dnf_prob = getattr(self.config, "collision_dnf_probability", 0.35)
+                if self.rng.random() < float(dnf_prob):
                     d.status = DriverStatus.DNF
                     self._log("DNF", f"{d.name} odpada po kolizji (DNF).")
                     continue
@@ -191,12 +245,14 @@ class RaceSimulation:
                     self._log("COL", f"Kolizja: {d.name} traci {penalty:.1f}s.")
 
             if self.rng.random() < self.config.incident_chance_per_lap:
+                had_yellow = True
                 loss = self.rng.uniform(0.4, 2.2)
                 d.total_time_s += loss
                 self._log("INC", f"Incydent na torze: {d.name} traci {loss:.1f}s.")
 
             # DNF
             if self.rng.random() < self._dnf_chance(d.skill):
+                had_yellow = True
                 d.status = DriverStatus.DNF
                 self._log("DNF", f"{d.name} odpada (awaria/wypadek).")
                 continue
@@ -246,6 +302,9 @@ class RaceSimulation:
         if not still_running:
             self._log("END", "Wyścig zakończony: wszyscy jadący ukończyli lub odpadli (DNF).")
             self.finished = True
+
+        if not self.finished and had_yellow:
+            self.flag_state = FlagState.YELLOW
 
     def _emit_overtakes(self, before: list[str], after: list[str]) -> None:
         before_idx = {name: i for i, name in enumerate(before)}

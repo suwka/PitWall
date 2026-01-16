@@ -14,7 +14,7 @@ from rich.text import Text
 
 from pitwall.config import SimulationConfig
 from pitwall.models import Driver, DriverStatus
-from pitwall.race import RaceEvent, RaceSimulation
+from pitwall.race import FlagState, RaceEvent, RaceSimulation
 
 
 def _fmt_time(seconds: float) -> str:
@@ -38,9 +38,26 @@ def _tire_text(tire_value: str) -> Text:
     return Text(tire_value, style=style)
 
 
+def _flag_text(flag: FlagState) -> Text:
+    if flag == FlagState.RED:
+        return Text("CZERWONA", style="red bold")
+    if flag == FlagState.YELLOW:
+        return Text("ŻÓŁTA", style="yellow")
+    return Text("ZIELONA", style="green")
+
+
 def _build_table(sim: RaceSimulation) -> Table:
+    title = Text()
+    title.append(sim.track_name, style="bold")
+    title.append(f" | Lap {sim._lap_index} ")
+    title.append(f"| Timer {_fmt_time(sim.race_timer_s())} ")
+    title.append("| Flaga ")
+    title.append(_flag_text(sim.flag_state))
+    title.append(" | Pogoda: ")
+    title.append("DESZCZ" if sim.raining else "SUCHO", style="blue" if sim.raining else "cyan")
+
     table = Table(
-        title=f"{sim.track_name} | Lap {sim._lap_index} | Pogoda: {'DESZCZ' if sim.raining else 'SUCHO'}",
+        title=title,
         box=box.SIMPLE_HEAVY,
         expand=True,
         show_lines=False,
@@ -214,6 +231,7 @@ def run_race_ui(sim: RaceSimulation, config: SimulationConfig, rng: random.Rando
                     if ev.kind == "RF" and log_index != last_rf_seen:
                         last_rf_seen = log_index
                         _wait_red_flag(console, config, rng)
+                        sim.clear_red_flag()
                         break
 
                 layout["top"].update(Panel(_build_table(sim), border_style="white"))
