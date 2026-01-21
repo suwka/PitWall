@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from pitwall.config import SimulationConfig
+from pitwall.config import get_config
 from pitwall.data_io import load_data
 from pitwall.race import RaceSimulation
 from pitwall.ui import run_race_ui
@@ -39,7 +39,7 @@ def _shuffle_grid(drivers: list) -> None:
 
 def run() -> None:
     console = Console()
-    config = SimulationConfig()
+    config = get_config()
     rng = random.Random()
 
     data = load_data(Path(__file__).resolve().parent.parent / "data")

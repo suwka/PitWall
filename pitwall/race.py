@@ -4,6 +4,7 @@ import random
 import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol
 
 from pitwall.config import SimulationConfig
 from pitwall.models import Driver, DriverStatus, TireState, TireType
@@ -21,6 +22,70 @@ class FlagState(str, Enum):
     RED = "RED"
 
 
+class FlagObserver(Protocol):
+    def on_flag_change(self, flag: FlagState) -> None: ...
+
+
+@dataclass
+class DriverRaceEffects:
+    pace_multiplier: float = 1.0
+    overtake_allowed: bool = True
+
+
+class DriverFlagObserver:
+    def __init__(self, *, effects: DriverRaceEffects, config: SimulationConfig) -> None:
+        self._effects = effects
+        self._config = config
+
+    def on_flag_change(self, flag: FlagState) -> None:
+        if flag == FlagState.YELLOW:
+            self._effects.pace_multiplier = float(getattr(self._config, "yellow_pace_multiplier", 1.30))
+            self._effects.overtake_allowed = False
+        else:
+            self._effects.pace_multiplier = 1.0
+            self._effects.overtake_allowed = True
+
+
+class PitStrategy(Protocol):
+    def should_pit(self, sim: "RaceSimulation", driver: Driver, *, force_compound_change: bool) -> bool: ...
+
+    def pick_next_compound(self, sim: "RaceSimulation", driver: Driver) -> TireType: ...
+
+
+class DefaultPitStrategy:
+    def should_pit(self, sim: "RaceSimulation", driver: Driver, *, force_compound_change: bool) -> bool:
+        return driver.needs_pit() or force_compound_change
+
+    def pick_next_compound(self, sim: "RaceSimulation", driver: Driver) -> TireType:
+        return driver.pick_next_compound(sim.raining)
+
+
+class NeutralizationPitStrategy(DefaultPitStrategy):
+    def should_pit(self, sim: "RaceSimulation", driver: Driver, *, force_compound_change: bool) -> bool:
+        if super().should_pit(sim, driver, force_compound_change=force_compound_change):
+            return True
+
+        # Konserwatywnie: pod żółtą flaga można „tani” pit, ale tylko jeśli
+        # (a) zużycie już wyraźne i (b) pit nie kosztuje pozycji.
+        if not sim.is_yellow_active():
+            return False
+        if sim.raining:
+            return False
+        tires = driver.ensure_tires()
+        if tires.tire_type == TireType.WET:
+            return False
+        if tires.wear_percent > 35.0:
+            return False
+
+        pit_time_estimate = sim.avg_pit_stop_s + 1.0
+        return sim.pit_wont_lose_position(driver, pit_time_estimate)
+
+
+@dataclass(frozen=True)
+class RestartMemento:
+    running_order: list[str]
+
+
 class RaceSimulation:
     def __init__(
         self,
@@ -32,6 +97,7 @@ class RaceSimulation:
         avg_pit_stop_s: float,
         raining: bool,
         config: SimulationConfig,
+        pit_strategy: PitStrategy | None = None,
         rng: random.Random | None = None,
     ) -> None:
         self.drivers = drivers
@@ -41,6 +107,7 @@ class RaceSimulation:
         self.avg_pit_stop_s = avg_pit_stop_s
         self.raining = raining
         self.config = config
+        self.pit_strategy: PitStrategy = pit_strategy or NeutralizationPitStrategy()
         self.rng = rng or random.Random()
 
         self.events: list[RaceEvent] = []
@@ -54,6 +121,16 @@ class RaceSimulation:
         # Flagi
         self.flag_state: FlagState = FlagState.GREEN
         self._red_flag_active: bool = False
+        self._yellow_laps_remaining: int = 0
+
+        # Observer: efekty flag na kierowcach
+        self._driver_effects: dict[str, DriverRaceEffects] = {d.name: DriverRaceEffects() for d in self.drivers}
+        self._flag_observers: list[FlagObserver] = [
+            DriverFlagObserver(effects=self._driver_effects[d.name], config=self.config) for d in self.drivers
+        ]
+
+        # Memento: ustawienie restartu po czerwonej
+        self._restart_memento: RestartMemento | None = None
 
         self._prepared: bool = False
 
@@ -61,6 +138,29 @@ class RaceSimulation:
         self._last_positions: list[str] = []
         self._last_red_flag_lap: int = -10_000
         self._planned_pit_lap: dict[str, int] = {}
+
+    def _set_flag(self, flag: FlagState) -> None:
+        if self.flag_state == flag:
+            return
+        self.flag_state = flag
+        for obs in self._flag_observers:
+            obs.on_flag_change(flag)
+
+    def is_yellow_active(self) -> bool:
+        return self._yellow_laps_remaining > 0
+
+    def pit_wont_lose_position(self, driver: Driver, pit_time_s: float) -> bool:
+        running = self.sorted_running()
+        idx = next((i for i, d in enumerate(running) if d.name == driver.name), None)
+        if idx is None:
+            return False
+
+        # jeśli jest ostatni z RUNNING – nie ma komu stracić pozycji "z tyłu" w tej prostej ocenie
+        if idx >= len(running) - 1:
+            return True
+        behind = running[idx + 1]
+        gap_to_behind = behind.total_time_s - driver.total_time_s
+        return gap_to_behind > (pit_time_s + 0.5)
 
     def prepare(self) -> None:
         if self._prepared:
@@ -132,7 +232,20 @@ class RaceSimulation:
     def clear_red_flag(self) -> None:
         self._red_flag_active = False
         if self.flag_state == FlagState.RED:
-            self.flag_state = FlagState.GREEN
+            self._set_flag(FlagState.GREEN)
+
+        # Memento: zbij stawkę do restartu (tylko RUNNING), zachowując kolejność.
+        if self._restart_memento is not None:
+            order = self._restart_memento.running_order
+            name_to_driver = {d.name: d for d in self.drivers}
+            ordered_running = [name_to_driver[n] for n in order if n in name_to_driver and name_to_driver[n].status == DriverStatus.RUNNING]
+            if ordered_running:
+                leader_time = ordered_running[0].total_time_s
+                gap_s = float(getattr(self.config, "restart_gap_s", 0.30))
+                for i, d in enumerate(ordered_running):
+                    d.total_time_s = leader_time + i * gap_s
+                self._last_positions = [d.name for d in ordered_running]
+            self._restart_memento = None
 
     def sorted_running(self) -> list[Driver]:
         running = [d for d in self.drivers if d.status == DriverStatus.RUNNING]
@@ -231,7 +344,10 @@ class RaceSimulation:
         ):
             self._last_red_flag_lap = self._lap_index
             self._red_flag_active = True
-            self.flag_state = FlagState.RED
+            # Memento: zapamiętaj kolejność RUNNING na restart.
+            self._restart_memento = RestartMemento(running_order=[d.name for d in self.sorted_running()])
+
+            self._set_flag(FlagState.RED)
 
             rf_min = float(getattr(self.config, "red_flag_duration_min_minutes", 15.0))
             rf_max = float(getattr(self.config, "red_flag_duration_max_minutes", 30.0))
@@ -251,9 +367,18 @@ class RaceSimulation:
             return
 
         # start okrążenia
-        self.flag_state = FlagState.GREEN
-        had_yellow = False
+        yellow_active = self.is_yellow_active()
+        if yellow_active:
+            self._set_flag(FlagState.YELLOW)
+            self._yellow_laps_remaining = max(0, self._yellow_laps_remaining - 1)
+        else:
+            self._set_flag(FlagState.GREEN)
+
+        yellow_triggered = False
+        yellow_reason: str | None = None
         self._lap_index += 1
+
+        order_before = [d.name for d in self.sorted_running()] if yellow_active else []
 
         for d in self.drivers:
             if d.status != DriverStatus.RUNNING:
@@ -268,9 +393,11 @@ class RaceSimulation:
             # incydenty / kolizje
             if self.rng.random() < self.config.collision_chance_per_lap:
                 # 50/50: DNF albo strata czasu
-                had_yellow = True
                 dnf_prob = getattr(self.config, "collision_dnf_probability", 0.35)
                 if self.rng.random() < float(dnf_prob):
+                    yellow_triggered = True
+                    if yellow_reason is None:
+                        yellow_reason = f"DNF: {d.name}"
                     d.status = DriverStatus.DNF
                     self._log("DNF", f"{d.name} odpada po kolizji (DNF).")
                     continue
@@ -280,14 +407,15 @@ class RaceSimulation:
                     self._log("COL", f"Kolizja: {d.name} traci {penalty:.1f}s.")
 
             if self.rng.random() < self.config.incident_chance_per_lap:
-                had_yellow = True
                 loss = self.rng.uniform(0.4, 2.2)
                 d.total_time_s += loss
                 self._log("INC", f"Incydent na torze: {d.name} traci {loss:.1f}s.")
 
             # DNF
             if self.rng.random() < self._dnf_chance(d.skill):
-                had_yellow = True
+                yellow_triggered = True
+                if yellow_reason is None:
+                    yellow_reason = f"DNF: {d.name}"
                 d.status = DriverStatus.DNF
                 self._log("DNF", f"{d.name} odpada (awaria/wypadek).")
                 continue
@@ -300,8 +428,8 @@ class RaceSimulation:
                 if planned is not None and d.pit_stops == 0 and d.lap >= planned and len(used_slicks) < 2:
                     force_compound_change = True
 
-            if d.needs_pit() or force_compound_change:
-                next_compound = d.pick_next_compound(self.raining)
+            if self.pit_strategy.should_pit(self, d, force_compound_change=force_compound_change):
+                next_compound = self.pit_strategy.pick_next_compound(self, d)
                 pit_time = self.avg_pit_stop_s + self.rng.uniform(0.0, 2.0)
                 d.total_time_s += pit_time
                 d.pit_stops += 1
@@ -318,6 +446,9 @@ class RaceSimulation:
             tires.apply_wear(wear)
 
             lap_time = self._lap_time_s(d, tires)
+            if yellow_active:
+                effects = self._driver_effects.get(d.name)
+                lap_time *= (effects.pace_multiplier if effects else float(getattr(self.config, "yellow_pace_multiplier", 1.30)))
             d.last_lap_s = lap_time
             d.total_time_s += lap_time
             d.lap += 1
@@ -326,11 +457,25 @@ class RaceSimulation:
                 d.status = DriverStatus.FINISHED
                 self._log("FIN", f"{d.name} przekracza linię mety!")
 
-        # wyprzedzenia
-        now_positions = [d.name for d in self.sorted_running()]
-        if self._last_positions:
-            self._emit_overtakes(self._last_positions, now_positions)
-        self._last_positions = now_positions
+        # żółta flaga: zakaz wyprzedzania → "dociśnij" czasy, aby zachować kolejność
+        if yellow_active and order_before:
+            name_to_driver = {d.name: d for d in self.drivers}
+            ordered = [name_to_driver[n] for n in order_before if n in name_to_driver and name_to_driver[n].status == DriverStatus.RUNNING]
+            min_gap = float(getattr(self.config, "yellow_min_gap_s", 0.20))
+            prev_total: float | None = None
+            for d in ordered:
+                if prev_total is None:
+                    prev_total = d.total_time_s
+                    continue
+                d.total_time_s = max(d.total_time_s, prev_total + min_gap)
+                prev_total = d.total_time_s
+            self._last_positions = [d.name for d in ordered]
+        else:
+            # wyprzedzenia
+            now_positions = [d.name for d in self.sorted_running()]
+            if self._last_positions:
+                self._emit_overtakes(self._last_positions, now_positions)
+            self._last_positions = now_positions
 
         # koniec: wszyscy aktywni dojechali
         still_running = any(d.status == DriverStatus.RUNNING for d in self.drivers)
@@ -338,8 +483,20 @@ class RaceSimulation:
             self._log("END", "Wyścig zakończony: wszyscy jadący ukończyli lub odpadli (DNF).")
             self.finished = True
 
-        if not self.finished and had_yellow:
-            self.flag_state = FlagState.YELLOW
+        if not self.finished and yellow_triggered:
+            min_laps = int(getattr(self.config, "yellow_flag_min_laps", 2))
+            max_laps = int(getattr(self.config, "yellow_flag_max_laps", 6))
+            if max_laps < min_laps:
+                max_laps = min_laps
+            new_duration = self.rng.randint(min_laps, max_laps)
+            before_remaining = self._yellow_laps_remaining
+            self._yellow_laps_remaining = max(self._yellow_laps_remaining, new_duration)
+            self._set_flag(FlagState.YELLOW)
+
+            # Logujemy tylko kiedy "ustawiamy" lub wydłużamy żółtą.
+            if self._yellow_laps_remaining > before_remaining:
+                reason = f" ({yellow_reason})" if yellow_reason else ""
+                self._log("YEL", f"Żółta flaga na {self._yellow_laps_remaining} okr.{reason}.")
 
     def _emit_overtakes(self, before: list[str], after: list[str]) -> None:
         before_idx = {name: i for i, name in enumerate(before)}

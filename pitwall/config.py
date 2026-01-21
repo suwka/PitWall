@@ -38,3 +38,19 @@ class SimulationConfig:
     # Tempo opon (różnica między mieszankami slick na okrążeniu).
     # 0.007 = 0.7% czasu okrążenia na "krok" (SOFT->MEDIUM albo MEDIUM->HARD).
     tire_compound_delta_pct_per_step: float = 0.003
+
+    # Żółta flaga
+    yellow_flag_min_laps: int = 2
+    yellow_flag_max_laps: int = 4
+    yellow_pace_multiplier: float = 1.30
+    yellow_min_gap_s: float = 0.20
+
+    # Restart po czerwonej fladze ("zbijanie" stawki)
+    restart_gap_s: float = 0.30
+
+
+_CONFIG_SINGLETON = SimulationConfig()
+
+
+def get_config() -> SimulationConfig:
+    return _CONFIG_SINGLETON

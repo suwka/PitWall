@@ -117,6 +117,7 @@ def _event_to_line(ev: RaceEvent) -> Text:
         "OVT": "OVT",
         "INC": "INC",
         "COL": "COL",
+        "YEL": "YEL",
         "RF": "RF",
         "FIN": "FIN",
         "END": "END",
@@ -124,11 +125,12 @@ def _event_to_line(ev: RaceEvent) -> Text:
     }.get(ev.kind, "INFO")
 
     color = {
-        "PIT": "yellow",
+        "PIT": "orange1",
         "DNF": "red",
         "OVT": "green",
         "INC": "magenta",
         "COL": "magenta",
+        "YEL": "yellow",
         "RF": "red",
         "FIN": "cyan",
         "END": "cyan",
