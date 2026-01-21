@@ -34,3 +34,7 @@ class SimulationConfig:
 
     # Minimalny odstęp między czerwonymi flagami (w okrążeniach)
     red_flag_cooldown_laps: int = 8
+
+    # Tempo opon (różnica między mieszankami slick na okrążeniu).
+    # 0.007 = 0.7% czasu okrążenia na "krok" (SOFT->MEDIUM albo MEDIUM->HARD).
+    tire_compound_delta_pct_per_step: float = 0.003

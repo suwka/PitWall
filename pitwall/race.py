@@ -180,6 +180,17 @@ class RaceSimulation:
         #           + random(-0.3, +0.3) + tire_penalty
         scatter = self.rng.uniform(-0.3, 0.3)
         tire_penalty = tires.penalty_s
+
+        # Prosta różnica tempa mieszanek (na sucho):
+        # SOFT najszybsze, MEDIUM pośrednie, HARD najwolniejsze.
+        # Skala względem toru: % * base_pace_s.
+        compound_step = 0
+        if tires.tire_type == TireType.SOFT:
+            compound_step = -1
+        elif tires.tire_type == TireType.HARD:
+            compound_step = 1
+        compound_delta_pct = float(getattr(self.config, "tire_compound_delta_pct_per_step", 0.007))
+        tire_penalty += self.base_pace_s * compound_delta_pct * compound_step
         wet_penalty = 0.0
         if self.raining and tires.tire_type != TireType.WET:
             wet_penalty = 8.0
